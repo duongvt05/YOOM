@@ -1,193 +1,149 @@
-'use client';
+"use client";
 
 import { 
   Camera, CameraOff, Mic, MicOff, PhoneOff, Users, 
-  MonitorUp, MessageSquare, Sparkles, Smile, Disc, Circle 
+  MonitorUp, MessageSquare, Sparkles, Smile, Disc, StopCircle 
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-// TYPE CHUẨN – ĐÃ FIX HOÀN HẢO!!!
 export type ActiveSidebarType = 'participants' | 'chat' | 'ai' | null;
 export type CallLayoutType = "grid" | "speaker" | "presentation";
 
 interface CallControlsProps {
   onLayoutChange: (layout: CallLayoutType) => void;
   onLeave: () => void;
-
-  // Media
   isMuted: boolean;
   toggleMute: () => void;
   isCamOff: boolean;
   toggleCam: () => void;
-
-  // Features
   isSharing: boolean;
   toggleShare: () => void;
   isRecording: boolean;
   toggleRecord: () => void;
-
-  // Sidebar & AI
   activeSidebar: ActiveSidebarType;
   setActiveSidebar: (val: ActiveSidebarType) => void;
-
-  // Reaction – ĐÃ FIX: không bắt buộc tham số
   onReaction?: () => void;
 }
 
 const CallControls = ({ 
-  onLeave, 
-  isMuted, toggleMute, 
-  isCamOff, toggleCam,
-  isSharing, toggleShare, 
-  isRecording, toggleRecord,
-  activeSidebar, setActiveSidebar, 
-  onReaction
+  onLeave, isMuted, toggleMute, isCamOff, toggleCam,
+  isSharing, toggleShare, isRecording, toggleRecord,
+  activeSidebar, setActiveSidebar, onReaction
 }: CallControlsProps) => {
 
-  const ControlButton = ({ 
-    icon: Icon, 
-    label, 
-    onClick, 
-    isActive = false, 
-    isDanger = false,
-    isRecording = false 
-  }: any) => (
-    <div className="flex flex-col items-center gap-1 group relative">
+  // Component nút bấm tùy chỉnh
+  const ControlButton = ({ icon: Icon, label, onClick, isActive, isDanger, className }: any) => (
+    <div className="group relative flex items-center justify-center">
       <button
         onClick={onClick}
         className={cn(
-          "relative p-4 rounded-2xl transition-all duration-300 shadow-lg",
-          "border border-transparent",
-          isActive || isRecording
-            ? isRecording
-              ? "bg-red-600 border-red-500 shadow-red-500/50 animate-pulse ring-4 ring-red-500/30"
-              : "bg-blue-600 border-blue-500 shadow-blue-500/50"
-            : "bg-gray-800 hover:bg-gray-700 hover:border-gray-600",
-          isDanger && "bg-red-600 hover:bg-red-700"
+          "p-3.5 rounded-full transition-all duration-300 transform hover:scale-110 shadow-lg border border-white/5",
+          "bg-gray-800/60 hover:bg-gray-700/80 backdrop-blur-md text-white", // Glass effect
+          isActive && !isDanger && "bg-brand-500 hover:bg-brand-600 shadow-brand-500/50",
+          isDanger && "bg-destruct hover:bg-red-600 shadow-red-500/50",
+          className
         )}
       >
-        {isRecording ? (
-          <div className="flex items-center gap-2">
-            <Circle className="w-5 h-5 fill-white" />
-            <span className="text-xs font-bold">REC</span>
-          </div>
-        ) : (
-          <Icon className="w-6 h-6" />
-        )}
+        <Icon className="w-5 h-5" />
       </button>
 
-      {/* Tooltip */}
-      <span className={cn(
-        "absolute -top-10 left-1/2 -translate-x-1/2 px-3 py-1 rounded-lg text-xs font-medium whitespace-nowrap",
-        "bg-black/90 text-white opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none",
-        "before:absolute before:top-full before:left-1/2 before:-translate-x-1/2 before:border-4 before:border-transparent before:border-t-black/90"
-      )}>
+      {/* Custom Tooltip */}
+      <span className="absolute -top-10 left-1/2 -translate-x-1/2 px-3 py-1 bg-dark-2/90 border border-white/10 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none backdrop-blur-sm">
         {label}
-      </span>
-
-      <span className={cn(
-        "text-xs text-gray-400 group-hover:text-white transition-colors",
-        isRecording && "text-red-500 font-bold animate-pulse"
-      )}>
-        {isRecording ? "Recording" : label}
       </span>
     </div>
   );
 
   return (
-    <div className="w-full flex items-center justify-between px-6 py-4 text-white h-full bg-[#1C1F2E] border-t border-gray-800">
+    <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-4 w-full px-4 pointer-events-none">
       
-      {/* Left: Recording Indicator */}
-      <div className="hidden lg:flex items-center gap-4">
-        {isRecording && (
-          <div className="flex items-center gap-3 bg-red-900/40 border border-red-500/50 px-4 py-2 rounded-full animate-pulse">
-            <div className="w-3 h-3 bg-red-500 rounded-full animate-ping"></div>
-            <div className="w-3 h-3 bg-red-500 rounded-full absolute"></div>
-            <span className="text-red-400 font-bold text-sm tracking-wider">● REC</span>
-            <span className="text-gray-300 text-xs">Đang ghi hình...</span>
-          </div>
-        )}
-      </div>
+      {/* Recording Status (Nổi lên trên) */}
+      {isRecording && (
+        <div className="flex items-center gap-2 bg-red-950/80 border border-red-500/30 px-4 py-1.5 rounded-full animate-pulse backdrop-blur-md shadow-lg pointer-events-auto">
+          <div className="w-2 h-2 bg-red-500 rounded-full animate-ping" />
+          <span className="text-red-200 text-xs font-bold tracking-widest uppercase">Recording</span>
+        </div>
+      )}
 
-      {/* Center: Main Controls */}
-      <div className="flex items-center justify-center gap-4">
-        {/* Mic */}
-        <ControlButton 
-          icon={isMuted ? MicOff : Mic} 
-          label={isMuted ? "Bật mic" : "Tắt mic"} 
-          onClick={toggleMute} 
-          isActive={isMuted}
-          isDanger={isMuted}
-        />
+      {/* Main Dock Container */}
+      <div className="flex items-center gap-2 sm:gap-4 p-3 rounded-2xl bg-dark-1/80 backdrop-blur-xl border border-white/10 shadow-2xl pointer-events-auto hover:border-white/20 transition-colors">
+        
+        {/* MEDIA GROUP */}
+        <div className="flex items-center gap-2">
+          <ControlButton 
+            icon={isMuted ? MicOff : Mic} 
+            label={isMuted ? "Bật Mic" : "Tắt Mic"} 
+            onClick={toggleMute} 
+            isDanger={isMuted} 
+          />
+          <ControlButton 
+            icon={isCamOff ? CameraOff : Camera} 
+            label={isCamOff ? "Bật Camera" : "Tắt Camera"} 
+            onClick={toggleCam} 
+            isDanger={isCamOff} 
+          />
+        </div>
 
-        {/* Camera */}
-        <ControlButton 
-          icon={isCamOff ? CameraOff : Camera} 
-          label={isCamOff ? "Bật camera" : "Tắt camera"} 
-          onClick={toggleCam} 
-          isActive={isCamOff}
-          isDanger={isCamOff}
-        />
+        {/* SEPARATOR */}
+        <div className="w-px h-8 bg-white/10 mx-1" />
 
-        {/* Share Screen */}
-        <ControlButton 
-          icon={MonitorUp} 
-          label={isSharing ? "Dừng chia sẻ" : "Chia sẻ màn hình"} 
-          onClick={toggleShare} 
-          isActive={isSharing}
-        />
+        {/* FEATURES GROUP */}
+        <div className="flex items-center gap-2">
+          <ControlButton 
+            icon={MonitorUp} 
+            label={isSharing ? "Dừng chia sẻ" : "Chia sẻ"} 
+            onClick={toggleShare} 
+            isActive={isSharing}
+            className={isSharing ? "bg-green-600 hover:bg-green-700" : ""}
+          />
+          <ControlButton 
+            icon={isRecording ? StopCircle : Disc} 
+            label={isRecording ? "Dừng ghi" : "Ghi hình"} 
+            onClick={toggleRecord} 
+            isActive={isRecording}
+            className={isRecording ? "bg-red-600 hover:bg-red-700 animate-pulse" : ""}
+          />
+          <ControlButton 
+            icon={Smile} 
+            label="Thả tim" 
+            onClick={onReaction}
+            className="text-pink-400 hover:text-pink-300"
+          />
+          <ControlButton 
+            icon={Sparkles} 
+            label="Trợ lý AI" 
+            onClick={() => setActiveSidebar(activeSidebar === 'ai' ? null : 'ai')} 
+            isActive={activeSidebar === 'ai'}
+            className={activeSidebar === 'ai' ? "bg-purple-600 hover:bg-purple-700 ring-2 ring-purple-400/30" : "text-yellow-400"}
+          />
+        </div>
 
-        {/* RECORD */}
-        <ControlButton 
-          icon={Disc} 
-          label={isRecording ? "Dừng ghi" : "Ghi hình"} 
-          onClick={toggleRecord} 
-          isActive={isRecording}
-          isRecording={isRecording}
-        />
+        {/* SEPARATOR */}
+        <div className="w-px h-8 bg-white/10 mx-1" />
 
-        {/* Reaction */}
-        <ControlButton 
-          icon={Smile} 
-          label="Phản ứng" 
-          onClick={onReaction || (() => {})}
-        />
+        {/* SIDEBAR GROUP */}
+        <div className="flex items-center gap-2">
+          <ControlButton 
+            icon={MessageSquare} 
+            label="Chat" 
+            onClick={() => setActiveSidebar(activeSidebar === 'chat' ? null : 'chat')} 
+            isActive={activeSidebar === 'chat'}
+          />
+          <ControlButton 
+            icon={Users} 
+            label="Thành viên" 
+            onClick={() => setActiveSidebar(activeSidebar === 'participants' ? null : 'participants')} 
+            isActive={activeSidebar === 'participants'}
+          />
+        </div>
 
-        <div className="w-px h-12 bg-gray-700 mx-2"></div>
-
-        {/* AI Bot */}
-        <ControlButton 
-          icon={Sparkles} 
-          label="AI Bot" 
-          onClick={() => setActiveSidebar(activeSidebar === 'ai' ? null : 'ai')} 
-          isActive={activeSidebar === 'ai'}
-        />
-
-        {/* Chat */}
-        <ControlButton 
-          icon={MessageSquare} 
-          label="Chat" 
-          onClick={() => setActiveSidebar(activeSidebar === 'chat' ? null : 'chat')} 
-          isActive={activeSidebar === 'chat'}
-        />
-
-        {/* Participants */}
-        <ControlButton 
-          icon={Users} 
-          label="Thành viên" 
-          onClick={() => setActiveSidebar(activeSidebar === 'participants' ? null : 'participants')} 
-          isActive={activeSidebar === 'participants'}
-        />
-      </div>
-
-      {/* Right: End Call */}
-      <div className="flex justify-end">
+        {/* LEAVE BUTTON (Tách biệt) */}
         <button 
           onClick={onLeave} 
-          className="px-8 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold text-lg transition-all shadow-lg hover:shadow-red-600/50 flex items-center gap-3"
+          className="ml-2 px-6 py-3.5 bg-red-600/90 hover:bg-red-600 text-white rounded-xl font-bold text-sm transition-all shadow-lg hover:shadow-red-600/40 flex items-center gap-2 backdrop-blur-sm"
         >
-          <PhoneOff className="w-5 h-5" />
-          Rời phòng
+          <PhoneOff className="w-4 h-4" />
+          <span className="hidden md:inline">Kết thúc</span>
         </button>
       </div>
     </div>
