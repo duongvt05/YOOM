@@ -1,5 +1,6 @@
 "use client";
 
+import { useState, useEffect, useRef } from 'react';
 import { 
   Camera, CameraOff, Mic, MicOff, PhoneOff, Users, 
   MonitorUp, MessageSquare, Sparkles, Smile, Disc, StopCircle 
@@ -31,6 +32,41 @@ const CallControls = ({
   activeSidebar, setActiveSidebar, onReaction
 }: CallControlsProps) => {
 
+  // --- LOGIC AUTO-HIDE (Mới thêm) ---
+  const [isVisible, setIsVisible] = useState(true);
+  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    const handleMouseMove = () => {
+      // 1. Hiện thanh công cụ khi chuột di chuyển
+      setIsVisible(true);
+
+      // 2. Xóa đếm ngược cũ
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+
+      // 3. Đặt đếm ngược mới: Ẩn sau 2.5s
+      timeoutRef.current = setTimeout(() => {
+        setIsVisible(false);
+      }, 2500);
+    };
+
+    // Lắng nghe sự kiện di chuột trên toàn bộ cửa sổ
+    window.addEventListener('mousemove', handleMouseMove);
+
+    // Dọn dẹp khi component unmount
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    };
+  }, []);
+
+  // Hàm giữ menu luôn hiện khi hover vào chính nó
+  const handleMouseEnterControls = () => {
+    setIsVisible(true);
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+  };
+  // ----------------------------------
+
   // Component nút bấm tùy chỉnh
   const ControlButton = ({ icon: Icon, label, onClick, isActive, isDanger, className }: any) => (
     <div className="group relative flex items-center justify-center">
@@ -55,7 +91,15 @@ const CallControls = ({
   );
 
   return (
-    <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-4 w-full px-4 pointer-events-none">
+    <div 
+      // Thêm sự kiện onMouseEnter để không ẩn khi đang thao tác
+      onMouseEnter={handleMouseEnterControls}
+      // Thêm logic CSS translate để trượt lên/xuống
+      className={cn(
+        "fixed left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-4 w-full px-4 transition-all duration-500 ease-in-out pointer-events-none",
+        isVisible ? "bottom-8 opacity-100 translate-y-0" : "-bottom-20 opacity-0 translate-y-full"
+      )}
+    >
       
       {/* Recording Status (Nổi lên trên) */}
       {isRecording && (
