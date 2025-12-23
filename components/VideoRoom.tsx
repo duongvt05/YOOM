@@ -11,6 +11,8 @@ import {
   Users,
   MessageSquare,
   Circle,
+  Copy,
+  Check, // <--- 1. THÊM ICON CHECK
 } from "lucide-react";
 
 import CallControls, { ActiveSidebarType, CallLayoutType } from "./CallControls";
@@ -21,7 +23,7 @@ import { getCurrentUser } from "@/actions/auth.actions";
 import { cn } from "@/lib/utils";
 import AIPanel from "./AIPanel";
 
-// Mở rộng Window interface để hỗ trợ Audio Mixing toàn cục
+// Mở rộng Window interface
 declare global {
   interface Window {
     audioContext?: AudioContext;
@@ -36,6 +38,7 @@ interface PeerData {
   peer: Peer.Instance;
   username: string;
   stream?: MediaStream;
+  isScreenShare?: boolean;
 }
 
 const VideoRoom = ({ roomId }: { roomId: string }) => {
@@ -45,7 +48,14 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
   // --- STATE ---
   const [isCallStarted, setIsCallStarted] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
+  
+  // 2. STATE CHO NÚT COPY
+  const [isCopied, setIsCopied] = useState(false);
+
+  // Streams
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [localScreenStream, setLocalScreenStream] = useState<MediaStream | null>(null);
+
   const [peers, setPeers] = useState<PeerData[]>([]);
   
   // --- REFS ---
@@ -74,7 +84,7 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
   const [latestSummary, setLatestSummary] = useState("");
   const [isListening, setIsListening] = useState(false);
 
-  // Refs cho AI/Recording
+  // Refs for AI/Rec
   const audioRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunks = useRef<Blob[]>([]);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -92,24 +102,18 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
   }, []);
 
   // ----------------------------------------------------------------
-  // WEBRTC HELPERS (Định nghĩa trước để dùng trong useEffect)
+  // WEBRTC HELPERS
   // ----------------------------------------------------------------
-
-  // Xử lý stream nhận được từ người khác (Thêm vào mixer âm thanh)
   const handleRemoteStream = useCallback((remoteStream: MediaStream, peerID: string) => {
-    // 1. Cập nhật UI Video
     setPeers((prev) =>
       prev.map((p) => (p.peerID === peerID ? { ...p, stream: remoteStream } : p))
     );
 
-    // 2. KẾT NỐI ÂM THANH NGƯỜI KHÁC VÀO BỘ TRỘN CHUNG
     if (window.audioContext && window.mixedOutput && remoteStream.getAudioTracks().length > 0) {
       try {
           const source = window.audioContext.createMediaStreamSource(remoteStream);
           source.connect(window.mixedOutput);
-      } catch (err) {
-          // Bỏ qua lỗi nếu đã connect rồi
-      }
+      } catch (err) {}
     }
   }, []);
 
@@ -160,22 +164,18 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
 
 
   // ----------------------------------------------------------------
-  // 2. MAIN SOCKET EFFECT (LOGIC CHÍNH ĐÃ FIX)
+  // 2. MAIN SOCKET EFFECT
   // ----------------------------------------------------------------
   useEffect(() => {
-    // QUAN TRỌNG: Chỉ chạy socket khi đã có User VÀ đã có Stream (localStream)
-    // Nếu chưa bấm "Bắt đầu gọi", socket sẽ chưa kết nối.
     if (!currentUser || !localStream) return;
 
     const SOCKET_URL = process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000"; 
 
-    // Khởi tạo socket
     socketRef.current = io(SOCKET_URL, {
       transports: ["websocket"],
       reconnection: true,
     });
 
-    // Sau khi connect, emit join room ngay lập tức
     socketRef.current.emit("join room", {
         roomID: roomId,
         username: currentUser.username,
@@ -183,24 +183,19 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
 
     // --- SOCKET LISTENERS ---
 
-    // Nhận danh sách user hiện có
     socketRef.current.on("all users", (users: Array<{ id: string; username: string }>) => {
-      // Lúc này chắc chắn streamRef.current đã có do điều kiện check ở đầu useEffect
       const myStream = streamRef.current; 
       if (!myStream) return;
 
       const newPeers: PeerData[] = [];
       
       users.forEach((user) => {
-         // Bỏ qua chính mình
          if (user.id === currentUser.id) return;
-         
-         // Check duplicate
          const exists = peersRef.current.some(p => p.peerID === user.id);
          if (exists) return;
 
          const peer = createPeer(user.id, socketRef.current.id, myStream, user.username);
-         const peerData = { peerID: user.id, peer, username: user.username };
+         const peerData = { peerID: user.id, peer, username: user.username, isScreenShare: false };
          peersRef.current.push(peerData);
          newPeers.push(peerData);
       });
@@ -210,28 +205,24 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
       }
     });
 
-    // Nhận cuộc gọi từ người mới vào
     socketRef.current.on("receiving-offer", (payload: any) => {
       const myStream = streamRef.current;
       if (!myStream) return;
 
-      // Check duplicate
       const exists = peersRef.current.some(p => p.peerID === payload.callerID);
       if (exists) return;
 
       const peer = addPeer(payload.signal, payload.callerID, myStream, payload.username || "Guest");
-      const peerData = { peerID: payload.callerID, peer, username: payload.username || "Guest" };
+      const peerData = { peerID: payload.callerID, peer, username: payload.username || "Guest", isScreenShare: false };
       peersRef.current.push(peerData);
       setPeers((prev) => [...prev, peerData]);
     });
 
-    // Nhận tín hiệu trả về (Handshake hoàn tất)
     socketRef.current.on("receiving returned signal", (payload: any) => {
       const item = peersRef.current.find((p) => p.peerID === payload.id);
       if (item) item.peer.signal(payload.signal);
     });
 
-    // Người khác rời phòng
     socketRef.current.on("user left", (id: string) => {
       const peerObj = peersRef.current.find((p) => p.peerID === id);
       peerObj?.peer.destroy();
@@ -239,10 +230,8 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
       setPeers((prev) => prev.filter((p) => p.peerID !== id));
     });
 
-    // --- SỰ KIỆN CHAT & AI ---
     socketRef.current.on("receive-chat", (data: { sender: string; msg: string; timestamp?: string }) => {
       setChatHistory((prev) => [...prev, data]);
-      // setTranscript((prev) => prev + `${data.sender}: ${data.msg}\n`); // Optional: add chat to transcript
     });
 
     socketRef.current.on("receive-reaction", (data: any) => {
@@ -263,62 +252,53 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
       });
     });
 
-    // Cleanup khi unmount hoặc dependencies thay đổi
+    socketRef.current.on("update-share-status", ({ peerId, isSharing }: { peerId: string, isSharing: boolean }) => {
+        setPeers(prev => prev.map(p => 
+            p.peerID === peerId ? { ...p, isScreenShare: isSharing } : p
+        ));
+    });
+
     return () => {
       stopVoiceListening();
-      
-      // Destroy peers
       peersRef.current.forEach((p) => p.peer.destroy());
       peersRef.current = [];
       setPeers([]);
-
-      // Disconnect Socket
       if (socketRef.current) {
          socketRef.current.disconnect();
          socketRef.current.off();
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId, currentUser, localStream]); // Dependencies quan trọng: localStream
+  }, [roomId, currentUser, localStream]);
 
 
-  // 3. HÀM START CALL (KHỞI TẠO STREAM & AUDIO CONTEXT)
+  // 3. START CALL
   const startCall = async () => {
     if (isCallStarted) return;
-
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      
-      // Cập nhật State và Ref
       setLocalStream(stream);
       streamRef.current = stream; 
-      
       setIsCallStarted(true);
       toast({ title: "Đã bật mic/camera thành công!" });
 
-      // Khởi tạo AudioContext cho AI Mix (Singleton)
       if (!window.audioContext) {
          const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
          window.audioContext = new AudioContext();
          window.mixedOutput = window.audioContext.createMediaStreamDestination();
          window.mixedAudioTrack = window.mixedOutput.stream.getAudioTracks()[0];
-         
-         // Thêm luồng âm thanh của chính mình vào mix
          const source = window.audioContext.createMediaStreamSource(stream);
          source.connect(window.mixedOutput);
       } else if (window.audioContext.state === 'suspended') {
          await window.audioContext.resume();
       }
-
-      // Lưu ý: Không cần emit "join room" ở đây nữa, useEffect sẽ tự làm việc đó khi thấy localStream thay đổi.
-
     } catch (err) {
       console.error("Lỗi camera/mic:", err);
       toast({ title: "Không thể truy cập camera/mic! Vui lòng cho phép", variant: "destructive" });
     }
   };
 
-  // --- CÁC CHỨC NĂNG KHÁC (UI, CHAT, REC) ---
+  // --- ACTIONS UI ---
 
   const showReactionAnimation = useCallback((emoji: string) => {
     setReaction(emoji);
@@ -329,6 +309,22 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
     const emoji = "❤️";
     showReactionAnimation(emoji);
     socketRef.current?.emit("send-reaction", { roomId, type: emoji });
+  };
+
+  // --- 3. CHỨC NĂNG COPY ROOM ID ĐÃ CẬP NHẬT ---
+  const copyRoomId = () => {
+    navigator.clipboard.writeText(roomId);
+    setIsCopied(true); // Bật dấu tích
+    
+    toast({
+        title: "Đã sao chép thành công!",
+        className: "bg-green-600 text-white border-none",
+    });
+
+    // Tắt dấu tích sau 2s
+    setTimeout(() => {
+        setIsCopied(false);
+    }, 2000);
   };
 
   const toggleMic = () => {
@@ -342,56 +338,57 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
   };
 
   const replaceTrackInPeers = useCallback((newStream: MediaStream) => {
-    setLocalStream(newStream);
-    streamRef.current = newStream; // Cập nhật ref
     peersRef.current.forEach(({ peer }) => {
       const sender = (peer as any)._pc?.getSenders().find((s: any) => s.track?.kind === "video");
-      if (sender && newStream.getVideoTracks()[0]) sender.replaceTrack(newStream.getVideoTracks()[0]);
+      if (sender && newStream.getVideoTracks()[0]) {
+        sender.replaceTrack(newStream.getVideoTracks()[0]);
+      }
     });
   }, []);
 
   const toggleShare = async () => {
     if (isSharing) {
-      try {
-        const camStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        replaceTrackInPeers(camStream);
-        setIsSharing(false);
-      } catch (err) {
-        console.error("Không thể bật camera:", err);
+      if (localScreenStream) {
+        localScreenStream.getTracks().forEach(track => track.stop());
       }
+      setLocalScreenStream(null);
+      setIsSharing(false);
+      socketRef.current?.emit("share-status-change", { roomId, isSharing: false });
+      if (localStream) replaceTrackInPeers(localStream);
     } else {
       try {
-        const screenStream = await (navigator.mediaDevices as any).getDisplayMedia({ video: true });
-        replaceTrackInPeers(screenStream);
+        const screenStream = await (navigator.mediaDevices as any).getDisplayMedia({ 
+            video: { cursor: "always" }, 
+            audio: false 
+        });
+        
+        setLocalScreenStream(screenStream);
         setIsSharing(true);
+        socketRef.current?.emit("share-status-change", { roomId, isSharing: true });
+        replaceTrackInPeers(screenStream);
+
         const track = screenStream.getVideoTracks()[0];
-        if (track) track.onended = () => toggleShare();
-      } catch (err) {
-        console.log("Hủy chia sẻ");
-      }
+        if (track) {
+            track.onended = () => { toggleShare(); };
+        }
+      } catch (err) { console.log("Hủy chia sẻ"); }
     }
   };
 
-  // --- CHAT LOGIC ---
   const sendChat = () => {
     if (!chatInput.trim()) return;
-    socketRef.current?.emit("send-chat", {
-      roomId,
-      msg: chatInput.trim(),
-    });
+    socketRef.current?.emit("send-chat", { roomId, msg: chatInput.trim() });
     setChatInput("");
   };
 
-  // --- VOICE / AI RECOGNITION (LOCAL - Browser API) ---
+  // --- VOICE / AI ---
   const startVoiceListening = () => {
     if (isListening) return;
-
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
       toast({ title: "Trình duyệt không hỗ trợ nghe giọng nói", variant: "destructive" });
       return;
     }
-
     const recognition = new SpeechRecognition();
     recognition.lang = "vi-VN";
     recognition.continuous = true;
@@ -400,16 +397,13 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
     recognition.onresult = (event: any) => {
       let final = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        if (event.results[i].isFinal) {
-          final += event.results[i][0].transcript;
-        }
+        if (event.results[i].isFinal) final += event.results[i][0].transcript;
       }
       if (final) {
         setTranscript((prev) => prev + `Bạn: ${final}\n`);
         setLatestText(final);
       }
     };
-
     recognition.onerror = () => stopVoiceListening();
     recognition.onend = () => setIsListening(false);
     recognition.start();
@@ -426,10 +420,8 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
     setIsListening(false);
   };
 
-  // --- AI FULL ROOM LISTENING (SERVER) ---
   const startFullRoomListening = async () => {
     if (!window.mixedAudioTrack) {
-        // Fallback: Nếu chưa có mixed track, thử lấy từ mic local
         if(localStream) {
              toast({ title: "Đang sử dụng mic cá nhân cho AI", description: "Âm thanh người khác có thể không được ghi nhận rõ." });
         } else {
@@ -439,16 +431,11 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
     }
 
     try {
-        if (window.audioContext?.state === 'suspended') {
-            await window.audioContext.resume();
-        }
-
-        // Lấy luồng âm thanh ĐÃ TRỘN (Cả mình + Bạn) hoặc Local nếu chưa có mix
+        if (window.audioContext?.state === 'suspended') await window.audioContext.resume();
         const trackToUse = window.mixedAudioTrack || localStream?.getAudioTracks()[0];
         if(!trackToUse) return;
 
         const mixedStream = new MediaStream([trackToUse]);
-        
         const recorder = new MediaRecorder(mixedStream, { mimeType: "audio/webm" });
         audioChunks.current = [];
 
@@ -460,38 +447,28 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
             if (audioChunks.current.length === 0) return;
             const blob = new Blob(audioChunks.current, { type: "audio/webm" });
             const reader = new FileReader();
-            
             reader.onloadend = async () => {
                 const base64 = (reader.result as string).split(",")[1];
                 try {
                     const res = await fetch("/api/speech", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ 
-                            action: "speech", 
-                            audio: base64 
-                        }),
+                        body: JSON.stringify({ action: "speech", audio: base64 }),
                     });
                     const data = await res.json();
                     if (data.text) {
                         setLatestText(data.text);
                         setTranscript(prev => prev + `Hội thoại: ${data.text}\n`);
                     }
-                } catch (err) {
-                    console.log("Lỗi AI:", err);
-                }
+                } catch (err) { console.log("Lỗi AI:", err); }
             };
             reader.readAsDataURL(blob);
         };
-
-        recorder.start(5000); // Gửi AI xử lý mỗi 5s
+        recorder.start(5000); 
         audioRecorderRef.current = recorder;
         setIsListening(true);
         toast({ title: "AI đang nghe cả phòng..." });
-
-    } catch (err) {
-        console.error("Lỗi Full Room Listening:", err);
-    }
+    } catch (err) { console.error("Lỗi Full Room Listening:", err); }
   };
 
   const stopFullRoomListening = () => {
@@ -502,40 +479,27 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
     setIsListening(false);
   };
 
-  // Tự động bật tắt mic khi mở tab AI
   useEffect(() => {
-    if (activeSidebar === "ai") {
-        startFullRoomListening(); 
-    } else {
-        stopFullRoomListening();
-        stopVoiceListening();
-    }
-    return () => {
-        stopFullRoomListening();
-        stopVoiceListening();
-    };
+    if (activeSidebar === "ai") { startFullRoomListening(); } 
+    else { stopFullRoomListening(); stopVoiceListening(); }
+    return () => { stopFullRoomListening(); stopVoiceListening(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSidebar]);
 
-  // --- RECORDING VIDEO MEETING ---
+  // --- RECORDING ---
   const startRecording = async () => {
     try {
       const screenStream = await navigator.mediaDevices.getDisplayMedia({
         video: { cursor: "always" } as any,
         audio: false 
       });
-      
       screenStreamRef.current = screenStream; 
 
       const mixedStream = new MediaStream();
       screenStream.getVideoTracks().forEach((t) => mixedStream.addTrack(t));
 
-      // Lấy âm thanh: Ưu tiên bộ trộn
-      if (window.mixedAudioTrack) {
-        mixedStream.addTrack(window.mixedAudioTrack);
-      } else if (localStream) {
-        localStream.getAudioTracks().forEach((t) => mixedStream.addTrack(t));
-      }
+      if (window.mixedAudioTrack) mixedStream.addTrack(window.mixedAudioTrack);
+      else if (localStream) localStream.getAudioTracks().forEach((t) => mixedStream.addTrack(t));
 
       const recorder = new MediaRecorder(mixedStream, { mimeType: "video/webm;codecs=vp9,opus" });
       recordedChunks.current = [];
@@ -545,10 +509,8 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
       };
 
       const handleStop = async () => {
-        if (screenStreamRef.current) {
-             screenStreamRef.current.getTracks().forEach(track => track.stop());
-        }
-
+        if (screenStreamRef.current) screenStreamRef.current.getTracks().forEach(track => track.stop());
+        
         const blob = new Blob(recordedChunks.current, { type: 'video/webm' });
         const username = currentUser?.username || "Guest";
         const filename = `${username}_${roomId}_${Date.now()}.webm`;
@@ -559,28 +521,15 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
 
         try {
           toast({ title: "Đang lưu video...", description: "Vui lòng chờ giây lát." });
-          const response = await fetch("/api/recordings", { 
-            method: "POST",
-            body: formData,
-          });
-
-          if (response.ok) {
-            toast({ title: "Thành công!", description: "Video đã được lưu." });
-          } else {
-            toast({ title: "Lưu thất bại", variant: "destructive" });
-          }
-        } catch (error) {
-          console.error("Upload error:", error);
-          toast({ title: "Lỗi kết nối server", variant: "destructive" });
-        }
-        
+          const response = await fetch("/api/recordings", { method: "POST", body: formData });
+          if (response.ok) toast({ title: "Thành công!", description: "Video đã được lưu." });
+          else toast({ title: "Lưu thất bại", variant: "destructive" });
+        } catch (error) { toast({ title: "Lỗi kết nối server", variant: "destructive" }); }
         setIsRecording(false);
       };
 
       recorder.onstop = handleStop;
-      screenStream.getVideoTracks()[0].onended = () => {
-          if (recorder.state === 'recording') recorder.stop();
-      };
+      screenStream.getVideoTracks()[0].onended = () => { if (recorder.state === 'recording') recorder.stop(); };
 
       recorder.start();
       mediaRecorderRef.current = recorder;
@@ -598,18 +547,14 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
     setIsRecording(false);
   };
 
-  const toggleRecord = () => {
-    isRecording ? stopRecording() : startRecording();
-  };
+  const toggleRecord = () => { isRecording ? stopRecording() : startRecording(); };
 
-  // --- SUMMARIZE ---
   const summarizeMeeting = async () => {
     const trackToUse = window.mixedAudioTrack || localStream?.getAudioTracks()[0];
     if (!trackToUse) {
         toast({ title: "Chưa có dữ liệu âm thanh!", variant: "destructive" });
         return;
     }
-
     setIsAiLoading(true);
     const mixedStream = new MediaStream([trackToUse]);
     const recorder = new MediaRecorder(mixedStream);
@@ -618,10 +563,7 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
     recorder.ondataavailable = e => chunks.push(e.data);
     recorder.start();
 
-    // Ghi 10s để test summarize
-    setTimeout(() => {
-        if(recorder.state === 'recording') recorder.stop();
-    }, 10000);
+    setTimeout(() => { if(recorder.state === 'recording') recorder.stop(); }, 10000);
 
     recorder.onstop = async () => {
         const fullAudioBlob = new Blob(chunks, { type: 'audio/webm' });
@@ -636,18 +578,10 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
                 setLatestSummary(data.summary);
                 toast({ title: "Đã tóm tắt!" });
             }
-        } catch (err) {
-            toast({ title: "Lỗi AI", variant: "destructive" });
-        } finally {
-            setIsAiLoading(false);
-        }
+        } catch (err) { toast({ title: "Lỗi AI", variant: "destructive" }); } 
+        finally { setIsAiLoading(false); }
     };
   };
-
-  const combinedStreams = [
-    ...(localStream ? [{ stream: localStream, name: currentUser?.username || "Bạn", isLocal: true }] : []),
-    ...peers.filter((p) => p.stream).map((p) => ({ stream: p.stream!, name: p.username, isLocal: false })),
-  ];
 
   return (
     <section className="relative h-screen w-full overflow-hidden bg-[#1C1F2E] flex flex-col">
@@ -671,11 +605,30 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
         </div>
       )}
 
-      {/* Header */}
-      <div className="absolute top-0 left-0 right-0 z-10 p-4 flex justify-between items-center h-16">
-        <h1 className="text-white font-bold text-lg">Room: {roomId?.slice(0, 8)}...</h1>
+      {/* --- HEADER --- */}
+      <div className="absolute top-0 left-0 right-0 z-10 p-4 flex justify-between items-center h-16 pointer-events-none">
+        
+        {/* Nút Copy ID (Đã sửa) */}
+        <button
+          onClick={copyRoomId}
+          className="pointer-events-auto flex items-center gap-2 bg-white/10 hover:bg-white/20 px-4 py-2 rounded-full backdrop-blur-md transition-all group border border-white/5 active:scale-95"
+        >
+          <div className="flex flex-col items-start">
+             <span className="text-[10px] uppercase text-white/50 font-bold tracking-wider">Room ID</span>
+             <h1 className="text-white font-bold text-sm sm:text-base font-mono flex items-center gap-2">
+               {roomId?.slice(0, 12)}...
+               {isCopied ? (
+                   <Check className="w-4 h-4 text-green-400 animate-in fade-in zoom-in" />
+               ) : (
+                   <Copy className="w-3.5 h-3.5 text-white/50 group-hover:text-white transition-colors" />
+               )}
+             </h1>
+          </div>
+        </button>
+
+        {/* Nút Recording */}
         {isRecording && (
-          <div className="flex items-center gap-2 bg-red-600/90 px-4 py-2 rounded-lg text-white animate-pulse font-bold">
+          <div className="flex items-center gap-2 bg-red-600/90 px-4 py-2 rounded-lg text-white animate-pulse font-bold pointer-events-auto shadow-lg shadow-red-900/20">
             <Circle className="w-3 h-3 fill-current" />
             REC
           </div>
@@ -685,8 +638,9 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
       {/* Video Grid */}
       <div className="flex-1 relative overflow-hidden">
         <VideoGrid
-          streams={combinedStreams}
-          isSharing={isSharing}
+          localCameraStream={localStream}
+          localScreenStream={localScreenStream}
+          peers={peers}
           isSidebarOpen={!!activeSidebar}
         />
       </div>
@@ -721,7 +675,7 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
 
         <div className="flex-1 overflow-hidden flex flex-col">
           {activeSidebar === "participants" && (
-            <ParticipantsList participants={combinedStreams} onClose={() => setActiveSidebar(null)} />
+            <ParticipantsList participants={peers} onClose={() => setActiveSidebar(null)} />
           )}
 
           {activeSidebar === "chat" && (
@@ -793,7 +747,7 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
       </div>
 
       {/* Control Bar */}
-      <div className="fixed bottom-0 left-0 right-0 h-24 bg-[#1C1F2E] border-t border-gray-800 flex items-center justify-center px-4 z-40 shadow-2xl">
+      <div>
         <CallControls
           onLeave={() => router.push("/")}
           onLayoutChange={setLayout}
