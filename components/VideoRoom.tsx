@@ -12,7 +12,7 @@ import {
   MessageSquare,
   Circle,
   Copy,
-  Check, // <--- 1. THÊM ICON CHECK
+  Check,
 } from "lucide-react";
 
 import CallControls, { ActiveSidebarType, CallLayoutType } from "./CallControls";
@@ -49,7 +49,7 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
   const [isCallStarted, setIsCallStarted] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
   
-  // 2. STATE CHO NÚT COPY
+  // STATE CHO NÚT COPY
   const [isCopied, setIsCopied] = useState(false);
 
   // Streams
@@ -250,6 +250,8 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
         description: data.summary,
         duration: 5000,
       });
+      // Nếu có tóm tắt mới thì tự mở panel AI
+      setActiveSidebar("ai");
     });
 
     socketRef.current.on("update-share-status", ({ peerId, isSharing }: { peerId: string, isSharing: boolean }) => {
@@ -311,20 +313,14 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
     socketRef.current?.emit("send-reaction", { roomId, type: emoji });
   };
 
-  // --- 3. CHỨC NĂNG COPY ROOM ID ĐÃ CẬP NHẬT ---
   const copyRoomId = () => {
     navigator.clipboard.writeText(roomId);
-    setIsCopied(true); // Bật dấu tích
-    
+    setIsCopied(true);
     toast({
         title: "Đã sao chép thành công!",
         className: "bg-green-600 text-white border-none",
     });
-
-    // Tắt dấu tích sau 2s
-    setTimeout(() => {
-        setIsCopied(false);
-    }, 2000);
+    setTimeout(() => { setIsCopied(false); }, 2000);
   };
 
   const toggleMic = () => {
@@ -486,7 +482,73 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSidebar]);
 
-  // --- RECORDING ---
+  // ==============================================================
+  // 4. HÀM MỚI: Xử lý video để lấy Transcript & Tóm tắt (Automation)
+  // ==============================================================
+  const processVideoForAI = async (videoBlob: Blob) => {
+    setIsAiLoading(true);
+    toast({ title: "Đang phân tích video...", description: "AI đang nghe lại nội dung cuộc họp." });
+
+    try {
+        // BƯỚC 1: Transcribe (Video -> Text)
+        const formData = new FormData();
+        formData.append("file", videoBlob);
+
+        const transRes = await fetch("/api/transcribe", {
+            method: "POST",
+            body: formData,
+        });
+
+        const transData = await transRes.json();
+        const fullText = transData.text;
+
+        if (!fullText) {
+            toast({ title: "Video không có tiếng!", variant: "destructive" });
+            setIsAiLoading(false);
+            return;
+        }
+
+        // Cập nhật transcript lên UI
+        setTranscript(prev => prev + `\n\n[RECORDING TRANSCRIPT]:\n${fullText}\n\n`);
+        setLatestText("Đã trích xuất xong nội dung từ video.");
+
+        // BƯỚC 2: Summarize (Text -> AI Summary)
+        toast({ title: "Đang tóm tắt...", description: "Đang tổng hợp các ý chính." });
+        
+        const sumRes = await fetch("/api/ai", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ 
+                transcript: fullText, 
+                action: "summary" 
+            }),
+        });
+
+        const sumData = await sumRes.json();
+        
+        if (sumData.result) {
+            setLatestSummary(sumData.result);
+            setActiveSidebar("ai"); // Tự động mở sidebar AI
+            
+            // Gửi tóm tắt cho mọi người
+            socketRef.current?.emit("ai-summary-update", { summary: sumData.result });
+            
+            toast({ 
+                title: "Hoàn tất!", 
+                description: "Đã có bản tóm tắt từ video.",
+                className: "bg-green-600 text-white" 
+            });
+        }
+
+    } catch (error) {
+        console.error(error);
+        toast({ title: "Lỗi xử lý AI", variant: "destructive" });
+    } finally {
+        setIsAiLoading(false);
+    }
+  };
+
+  // --- RECORDING (Đã cập nhật) ---
   const startRecording = async () => {
     try {
       const screenStream = await navigator.mediaDevices.getDisplayMedia({
@@ -498,6 +560,7 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
       const mixedStream = new MediaStream();
       screenStream.getVideoTracks().forEach((t) => mixedStream.addTrack(t));
 
+      // Thêm Audio vào video (quan trọng để AI nghe được)
       if (window.mixedAudioTrack) mixedStream.addTrack(window.mixedAudioTrack);
       else if (localStream) localStream.getAudioTracks().forEach((t) => mixedStream.addTrack(t));
 
@@ -508,23 +571,29 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
         if (e.data.size > 0) recordedChunks.current.push(e.data);
       };
 
+      // XỬ LÝ KHI DỪNG QUAY
       const handleStop = async () => {
         if (screenStreamRef.current) screenStreamRef.current.getTracks().forEach(track => track.stop());
         
         const blob = new Blob(recordedChunks.current, { type: 'video/webm' });
+        
+        // 1. Lưu video (Logic cũ)
         const username = currentUser?.username || "Guest";
         const filename = `${username}_${roomId}_${Date.now()}.webm`;
-
         const formData = new FormData();
         formData.append("file", blob, filename);
         formData.append("roomId", roomId);
 
         try {
-          toast({ title: "Đang lưu video...", description: "Vui lòng chờ giây lát." });
-          const response = await fetch("/api/recordings", { method: "POST", body: formData });
-          if (response.ok) toast({ title: "Thành công!", description: "Video đã được lưu." });
-          else toast({ title: "Lưu thất bại", variant: "destructive" });
-        } catch (error) { toast({ title: "Lỗi kết nối server", variant: "destructive" }); }
+          fetch("/api/recordings", { method: "POST", body: formData });
+          toast({ title: "Đã lưu video!", description: "Đang gửi đi phân tích..." });
+          
+          // 2. Tự động gọi AI Tóm tắt (Logic mới)
+          await processVideoForAI(blob);
+
+        } catch (error) { 
+            toast({ title: "Lỗi kết nối", variant: "destructive" }); 
+        }
         setIsRecording(false);
       };
 
@@ -534,7 +603,7 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
       recorder.start();
       mediaRecorderRef.current = recorder;
       setIsRecording(true);
-      toast({ title: "Đang ghi hình...", description: "Đang quay toàn bộ màn hình." });
+      toast({ title: "Đang ghi hình...", description: "Dừng quay để nhận bản tóm tắt." });
 
     } catch (err) {
       console.error("Ghi hình lỗi:", err);
@@ -549,6 +618,7 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
 
   const toggleRecord = () => { isRecording ? stopRecording() : startRecording(); };
 
+  // Hàm này vẫn giữ để tóm tắt thủ công nếu muốn (không cần quay video)
   const summarizeMeeting = async () => {
     const trackToUse = window.mixedAudioTrack || localStream?.getAudioTracks()[0];
     if (!trackToUse) {
@@ -563,23 +633,13 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
     recorder.ondataavailable = e => chunks.push(e.data);
     recorder.start();
 
+    // Nghe 10 giây rồi tóm tắt
     setTimeout(() => { if(recorder.state === 'recording') recorder.stop(); }, 10000);
 
     recorder.onstop = async () => {
         const fullAudioBlob = new Blob(chunks, { type: 'audio/webm' });
-        const form = new FormData();
-        form.append('audio', fullAudioBlob, 'full-meeting-audio.webm');
-        form.append('roomId', roomId);
-
-        try {
-            const res = await fetch('/api/speech', { method: 'POST', body: form });
-            const data = await res.json();
-            if (data.summary) {
-                setLatestSummary(data.summary);
-                toast({ title: "Đã tóm tắt!" });
-            }
-        } catch (err) { toast({ title: "Lỗi AI", variant: "destructive" }); } 
-        finally { setIsAiLoading(false); }
+        // Gọi hàm xử lý chung (như video)
+        await processVideoForAI(fullAudioBlob);
     };
   };
 
@@ -608,7 +668,7 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
       {/* --- HEADER --- */}
       <div className="absolute top-0 left-0 right-0 z-10 p-4 flex justify-between items-center h-16 pointer-events-none">
         
-        {/* Nút Copy ID (Đã sửa) */}
+        {/* Nút Copy ID */}
         <button
           onClick={copyRoomId}
           className="pointer-events-auto flex items-center gap-2 bg-white/10 hover:bg-white/20 px-4 py-2 rounded-full backdrop-blur-md transition-all group border border-white/5 active:scale-95"
