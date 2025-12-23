@@ -3,15 +3,11 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import io from "socket.io-client";
 import Peer from "simple-peer";
 import { useRouter } from "next/navigation";
-import { getSocket } from "@/lib/socket"; // Giữ import cũ của bạn nếu cần, nhưng logic dưới sẽ dùng socketRef
 import {
   X,
   Send,
-  Sparkles,
   Mic,
-  MicOff,
   Video,
-  VideoOff,
   Users,
   MessageSquare,
   Circle,
@@ -20,17 +16,18 @@ import {
 import CallControls, { ActiveSidebarType, CallLayoutType } from "./CallControls";
 import ParticipantsList from "./ParticipantsList";
 import VideoGrid from "./VideoGrid";
-import Loader from "./Loader";
 import { useToast } from "./ui/use-toast";
 import { getCurrentUser } from "@/actions/auth.actions";
 import { cn } from "@/lib/utils";
 import AIPanel from "./AIPanel";
 
+// Mở rộng Window interface để hỗ trợ Audio Mixing toàn cục
 declare global {
   interface Window {
     audioContext?: AudioContext;
     mixedOutput?: MediaStreamAudioDestinationNode;
     mixedAudioTrack?: MediaStreamTrack;
+    webkitAudioContext?: typeof AudioContext;
   }
 }
 
@@ -50,14 +47,12 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [peers, setPeers] = useState<PeerData[]>([]);
-  const recordingStreamRef = useRef<MediaStream | null>(null);
   
-  
-  // --- REFS (QUAN TRỌNG ĐỂ FIX LỖI) ---
+  // --- REFS ---
   const socketRef = useRef<any>(null);
   const peersRef = useRef<PeerData[]>([]);
-  const streamRef = useRef<MediaStream | null>(null); // Ref lưu stream để socket truy cập
-  const userRef = useRef<any>(null); // Ref lưu user
+  const streamRef = useRef<MediaStream | null>(null); 
+  const userRef = useRef<any>(null);
 
   // --- UI STATE ---
   const [layout, setLayout] = useState<CallLayoutType>("grid");
@@ -74,9 +69,7 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
 
   // --- AI / VOICE STATE ---
   const [transcript, setTranscript] = useState("");
-  const [aiResult, setAiResult] = useState("");
   const [isAiLoading, setIsAiLoading] = useState(false);
-  const [targetLang, setTargetLang] = useState<"vi" | "en">("en");
   const [latestText, setLatestText] = useState("");
   const [latestSummary, setLatestSummary] = useState("");
   const [isListening, setIsListening] = useState(false);
@@ -98,40 +91,135 @@ const VideoRoom = ({ roomId }: { roomId: string }) => {
     });
   }, []);
 
-  // 2. KHỞI TẠO SOCKET VÀ SỰ KIỆN (FIX: Đưa ra khỏi startCall)
+  // ----------------------------------------------------------------
+  // WEBRTC HELPERS (Định nghĩa trước để dùng trong useEffect)
+  // ----------------------------------------------------------------
+
+  // Xử lý stream nhận được từ người khác (Thêm vào mixer âm thanh)
+  const handleRemoteStream = useCallback((remoteStream: MediaStream, peerID: string) => {
+    // 1. Cập nhật UI Video
+    setPeers((prev) =>
+      prev.map((p) => (p.peerID === peerID ? { ...p, stream: remoteStream } : p))
+    );
+
+    // 2. KẾT NỐI ÂM THANH NGƯỜI KHÁC VÀO BỘ TRỘN CHUNG
+    if (window.audioContext && window.mixedOutput && remoteStream.getAudioTracks().length > 0) {
+      try {
+          const source = window.audioContext.createMediaStreamSource(remoteStream);
+          source.connect(window.mixedOutput);
+      } catch (err) {
+          // Bỏ qua lỗi nếu đã connect rồi
+      }
+    }
+  }, []);
+
+  const createPeer = useCallback((userToSignal: string, callerID: string, stream: MediaStream, username: string) => {
+    const peer = new Peer({ 
+        initiator: true, 
+        trickle: false, 
+        stream, 
+        config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] } 
+    });
+
+    peer.on("signal", (signal) => socketRef.current?.emit("sending signal", { userToSignal, callerID, signal }));
+    
+    peer.on("stream", (remoteStream: MediaStream) => {
+      handleRemoteStream(remoteStream, userToSignal);
+    });
+
+    peer.on("error", (err) => {
+        console.warn(`Peer connection error with ${username}:`, err);
+    });
+    
+    return peer;
+  }, [handleRemoteStream]);
+
+  const addPeer = useCallback((incomingSignal: any, callerID: string, stream: MediaStream, username: string) => {
+    const peer = new Peer({
+      initiator: false,
+      trickle: false,
+      stream,
+      config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] } 
+    });
+
+    peer.on("signal", (signal) => {
+      socketRef.current?.emit("returning signal", { signal, callerID });
+    });
+
+    peer.on("stream", (remoteStream: MediaStream) => {
+      handleRemoteStream(remoteStream, callerID);
+    });
+
+    peer.on("error", (err) => {
+        console.warn(`Peer connection error with ${username}:`, err);
+    });
+
+    peer.signal(incomingSignal);
+    return peer;
+  }, [handleRemoteStream]);
+
+
+  // ----------------------------------------------------------------
+  // 2. MAIN SOCKET EFFECT (LOGIC CHÍNH ĐÃ FIX)
+  // ----------------------------------------------------------------
   useEffect(() => {
-    if (!currentUser) return;
+    // QUAN TRỌNG: Chỉ chạy socket khi đã có User VÀ đã có Stream (localStream)
+    // Nếu chưa bấm "Bắt đầu gọi", socket sẽ chưa kết nối.
+    if (!currentUser || !localStream) return;
 
-   // Dùng đúng IP LAN của máy đang chạy Node.js Server
-const SOCKET_URL = process.env.NEXT_PUBLIC_BASE_URL; 
+    const SOCKET_URL = process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000"; 
 
-socketRef.current = io(SOCKET_URL, {
-  transports: ["websocket"],
-  reconnection: true,
-});
+    // Khởi tạo socket
+    socketRef.current = io(SOCKET_URL, {
+      transports: ["websocket"],
+      reconnection: true,
+    });
+
+    // Sau khi connect, emit join room ngay lập tức
+    socketRef.current.emit("join room", {
+        roomID: roomId,
+        username: currentUser.username,
+    });
 
     // --- SOCKET LISTENERS ---
 
-    // Nhận danh sách user hiện có (chạy sau khi mình join)
+    // Nhận danh sách user hiện có
     socketRef.current.on("all users", (users: Array<{ id: string; username: string }>) => {
-      // Chỉ tạo peer khi đã có stream (streamRef đã được set ở startCall)
-      if (!streamRef.current) return;
-      
+      // Lúc này chắc chắn streamRef.current đã có do điều kiện check ở đầu useEffect
+      const myStream = streamRef.current; 
+      if (!myStream) return;
+
       const newPeers: PeerData[] = [];
+      
       users.forEach((user) => {
-        const peer = createPeer(user.id, socketRef.current.id, streamRef.current!, user.username);
-        const peerData = { peerID: user.id, peer, username: user.username };
-        peersRef.current.push(peerData);
-        newPeers.push(peerData);
+         // Bỏ qua chính mình
+         if (user.id === currentUser.id) return;
+         
+         // Check duplicate
+         const exists = peersRef.current.some(p => p.peerID === user.id);
+         if (exists) return;
+
+         const peer = createPeer(user.id, socketRef.current.id, myStream, user.username);
+         const peerData = { peerID: user.id, peer, username: user.username };
+         peersRef.current.push(peerData);
+         newPeers.push(peerData);
       });
-      setPeers(newPeers);
+
+      if(newPeers.length > 0) {
+        setPeers(prev => [...prev, ...newPeers]);
+      }
     });
 
     // Nhận cuộc gọi từ người mới vào
     socketRef.current.on("receiving-offer", (payload: any) => {
-      if (!streamRef.current) return;
+      const myStream = streamRef.current;
+      if (!myStream) return;
 
-      const peer = addPeer(payload.signal, payload.callerID, streamRef.current!, payload.username || "Guest");
+      // Check duplicate
+      const exists = peersRef.current.some(p => p.peerID === payload.callerID);
+      if (exists) return;
+
+      const peer = addPeer(payload.signal, payload.callerID, myStream, payload.username || "Guest");
       const peerData = { peerID: payload.callerID, peer, username: payload.username || "Guest" };
       peersRef.current.push(peerData);
       setPeers((prev) => [...prev, peerData]);
@@ -154,7 +242,7 @@ socketRef.current = io(SOCKET_URL, {
     // --- SỰ KIỆN CHAT & AI ---
     socketRef.current.on("receive-chat", (data: { sender: string; msg: string; timestamp?: string }) => {
       setChatHistory((prev) => [...prev, data]);
-      setTranscript((prev) => prev + `${data.sender}: ${data.msg}\n`);
+      // setTranscript((prev) => prev + `${data.sender}: ${data.msg}\n`); // Optional: add chat to transcript
     });
 
     socketRef.current.on("receive-reaction", (data: any) => {
@@ -171,20 +259,30 @@ socketRef.current = io(SOCKET_URL, {
       toast({
         title: "Tóm tắt mới từ cả phòng!",
         description: data.summary,
-        duration: 15000,
+        duration: 5000,
       });
     });
 
+    // Cleanup khi unmount hoặc dependencies thay đổi
     return () => {
       stopVoiceListening();
-      localStream?.getTracks().forEach((t) => t.stop());
+      
+      // Destroy peers
       peersRef.current.forEach((p) => p.peer.destroy());
-      socketRef.current?.disconnect();
+      peersRef.current = [];
+      setPeers([]);
+
+      // Disconnect Socket
+      if (socketRef.current) {
+         socketRef.current.disconnect();
+         socketRef.current.off();
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId, currentUser]);
+  }, [roomId, currentUser, localStream]); // Dependencies quan trọng: localStream
 
-  // 3. HÀM START CALL (Đã sửa logic để đồng bộ)
+
+  // 3. HÀM START CALL (KHỞI TẠO STREAM & AUDIO CONTEXT)
   const startCall = async () => {
     if (isCallStarted) return;
 
@@ -193,12 +291,12 @@ socketRef.current = io(SOCKET_URL, {
       
       // Cập nhật State và Ref
       setLocalStream(stream);
-      streamRef.current = stream; // QUAN TRỌNG: Socket sẽ đọc từ đây
+      streamRef.current = stream; 
       
       setIsCallStarted(true);
       toast({ title: "Đã bật mic/camera thành công!" });
 
-      // Khởi tạo AudioContext cho AI (Singleton để tránh crash)
+      // Khởi tạo AudioContext cho AI Mix (Singleton)
       if (!window.audioContext) {
          const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
          window.audioContext = new AudioContext();
@@ -212,11 +310,7 @@ socketRef.current = io(SOCKET_URL, {
          await window.audioContext.resume();
       }
 
-      // SAU KHI CÓ STREAM MỚI GỬI JOIN ROOM
-      socketRef.current.emit("join room", {
-        roomID: roomId,
-        username: userRef.current?.username || "Guest",
-      });
+      // Lưu ý: Không cần emit "join room" ở đây nữa, useEffect sẽ tự làm việc đó khi thấy localStream thay đổi.
 
     } catch (err) {
       console.error("Lỗi camera/mic:", err);
@@ -224,78 +318,7 @@ socketRef.current = io(SOCKET_URL, {
     }
   };
 
-// --- WEBRTC HELPERS (ĐÃ FIX LỖI CRASH) ---
-
-  const createPeer = useCallback((userToSignal: string, callerID: string, stream: MediaStream, username: string) => {
-    const peer = new Peer({ 
-        initiator: true, 
-        trickle: false, 
-        stream, 
-        config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] } 
-    });
-
-    peer.on("signal", (signal) => socketRef.current?.emit("sending signal", { userToSignal, callerID, signal }));
-    
-    peer.on("stream", (remoteStream: MediaStream) => {
-      handleRemoteStream(remoteStream, userToSignal);
-    });
-
-    // [FIX QUAN TRỌNG] Thêm đoạn này để chặn màn hình đỏ khi lỗi kết nối
-    peer.on("error", (err) => {
-        console.warn("Peer connection error (createPeer):", err);
-        // Bạn có thể toast báo lỗi nhẹ nếu muốn, nhưng quan trọng là không để app sập
-    });
-    
-    return peer;
-  }, []);
-
-  const addPeer = useCallback((incomingSignal: any, callerID: string, stream: MediaStream, username: string) => {
-    const peer = new Peer({
-      initiator: false,
-      trickle: false,
-      stream,
-      config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] } 
-    });
-
-    peer.on("signal", (signal) => {
-      socketRef.current?.emit("returning signal", { signal, callerID });
-    });
-
-    peer.on("stream", (remoteStream: MediaStream) => {
-      handleRemoteStream(remoteStream, callerID);
-    });
-
-    // [FIX QUAN TRỌNG] Thêm đoạn này để chặn màn hình đỏ khi lỗi kết nối
-    peer.on("error", (err) => {
-        console.warn("Peer connection error (addPeer):", err);
-    });
-
-    peer.signal(incomingSignal);
-    return peer;
-  }, []);
-
-  // Xử lý stream nhận được (Cập nhật UI + Mix Audio cho AI)
-
-const handleRemoteStream = (remoteStream: MediaStream, peerID: string) => {
-    // 1. Cập nhật UI Video
-    setPeers((prev) =>
-      prev.map((p) => (p.peerID === peerID ? { ...p, stream: remoteStream } : p))
-    );
-
-    // 2. [FIX] KẾT NỐI ÂM THANH NGƯỜI KHÁC VÀO BỘ TRỘN CHUNG
-    // Để AI và Ghi hình đều dùng được
-    if (window.audioContext && window.mixedOutput && remoteStream.getAudioTracks().length > 0) {
-      try {
-          const source = window.audioContext.createMediaStreamSource(remoteStream);
-          source.connect(window.mixedOutput);
-          console.log("Đã nối âm thanh peer vào mixer");
-      } catch (err) {
-          // Bỏ qua lỗi nếu đã connect rồi
-      }
-    }
-};
-
-  // --- CÁC CHỨC NĂNG KHÁC (GIỮ NGUYÊN) ---
+  // --- CÁC CHỨC NĂNG KHÁC (UI, CHAT, REC) ---
 
   const showReactionAnimation = useCallback((emoji: string) => {
     setReaction(emoji);
@@ -359,7 +382,7 @@ const handleRemoteStream = (remoteStream: MediaStream, peerID: string) => {
     setChatInput("");
   };
 
-  // --- VOICE / AI RECOGNITION (LOCAL) ---
+  // --- VOICE / AI RECOGNITION (LOCAL - Browser API) ---
   const startVoiceListening = () => {
     if (isListening) return;
 
@@ -392,81 +415,84 @@ const handleRemoteStream = (remoteStream: MediaStream, peerID: string) => {
     recognition.start();
     recognitionRef.current = recognition;
     setIsListening(true);
-    toast({ title: "Đang nghe bạn nói... Nói đi nào!" });
+    toast({ title: "Đang nghe bạn nói..." });
   };
 
   const stopVoiceListening = () => {
     if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch (e) {}
+      try { recognitionRef.current.stop(); } catch (e) {}
       recognitionRef.current = null;
     }
     setIsListening(false);
   };
 
   // --- AI FULL ROOM LISTENING (SERVER) ---
- // Tìm hàm startFullRoomListening và thay thế bằng code này:
-const startFullRoomListening = async () => {
-  // [FIX] Kiểm tra bộ trộn thay vì streamRef
-  if (!window.mixedAudioTrack) {
-      toast({ title: "Chưa có âm thanh để nghe!", variant: "destructive" });
-      return;
-  }
+  const startFullRoomListening = async () => {
+    if (!window.mixedAudioTrack) {
+        // Fallback: Nếu chưa có mixed track, thử lấy từ mic local
+        if(localStream) {
+             toast({ title: "Đang sử dụng mic cá nhân cho AI", description: "Âm thanh người khác có thể không được ghi nhận rõ." });
+        } else {
+             toast({ title: "Chưa có âm thanh để nghe!", variant: "destructive" });
+             return;
+        }
+    }
 
-  try {
-      if (window.audioContext?.state === 'suspended') {
-          await window.audioContext.resume();
-      }
+    try {
+        if (window.audioContext?.state === 'suspended') {
+            await window.audioContext.resume();
+        }
 
-      // [FIX] QUAN TRỌNG: Lấy luồng âm thanh ĐÃ TRỘN (Cả mình + Bạn)
-      const mixedStream = new MediaStream([window.mixedAudioTrack]);
-      
-      const recorder = new MediaRecorder(mixedStream, { mimeType: "audio/webm" });
-      audioChunks.current = [];
+        // Lấy luồng âm thanh ĐÃ TRỘN (Cả mình + Bạn) hoặc Local nếu chưa có mix
+        const trackToUse = window.mixedAudioTrack || localStream?.getAudioTracks()[0];
+        if(!trackToUse) return;
 
-      recorder.ondataavailable = (e) => {
-          if (e.data.size > 0) audioChunks.current.push(e.data);
-      };
+        const mixedStream = new MediaStream([trackToUse]);
+        
+        const recorder = new MediaRecorder(mixedStream, { mimeType: "audio/webm" });
+        audioChunks.current = [];
 
-      recorder.onstop = async () => {
-          if (audioChunks.current.length === 0) return;
-          const blob = new Blob(audioChunks.current, { type: "audio/webm" });
-          const reader = new FileReader();
-          
-          reader.onloadend = async () => {
-              const base64 = (reader.result as string).split(",")[1];
-              try {
-                  // [FIX] Thêm action: "speech" để khớp với Backend mới
-                  const res = await fetch("/api/speech", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ 
-                          action: "speech", 
-                          audio: base64 
-                      }),
-                  });
-                  const data = await res.json();
-                  if (data.text) {
-                      setLatestText(data.text);
-                      setTranscript(prev => prev + `Hội thoại: ${data.text}\n`);
-                  }
-              } catch (err) {
-                  console.log("Lỗi AI:", err);
-              }
-          };
-          reader.readAsDataURL(blob);
-      };
+        recorder.ondataavailable = (e) => {
+            if (e.data.size > 0) audioChunks.current.push(e.data);
+        };
 
-      recorder.start(5000); // Gửi AI xử lý mỗi 5s
-      audioRecorderRef.current = recorder;
-      setIsListening(true);
-      toast({ title: "AI đang nghe cả phòng..." });
+        recorder.onstop = async () => {
+            if (audioChunks.current.length === 0) return;
+            const blob = new Blob(audioChunks.current, { type: "audio/webm" });
+            const reader = new FileReader();
+            
+            reader.onloadend = async () => {
+                const base64 = (reader.result as string).split(",")[1];
+                try {
+                    const res = await fetch("/api/speech", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ 
+                            action: "speech", 
+                            audio: base64 
+                        }),
+                    });
+                    const data = await res.json();
+                    if (data.text) {
+                        setLatestText(data.text);
+                        setTranscript(prev => prev + `Hội thoại: ${data.text}\n`);
+                    }
+                } catch (err) {
+                    console.log("Lỗi AI:", err);
+                }
+            };
+            reader.readAsDataURL(blob);
+        };
 
-  } catch (err) {
-      console.error("Lỗi Full Room Listening:", err);
-  }
-};
+        recorder.start(5000); // Gửi AI xử lý mỗi 5s
+        audioRecorderRef.current = recorder;
+        setIsListening(true);
+        toast({ title: "AI đang nghe cả phòng..." });
+
+    } catch (err) {
+        console.error("Lỗi Full Room Listening:", err);
+    }
+  };
 
   const stopFullRoomListening = () => {
     if (audioRecorderRef.current) {
@@ -479,7 +505,7 @@ const startFullRoomListening = async () => {
   // Tự động bật tắt mic khi mở tab AI
   useEffect(() => {
     if (activeSidebar === "ai") {
-        startFullRoomListening(); // Hoặc startVoiceListening tùy logic bạn muốn ưu tiên
+        startFullRoomListening(); 
     } else {
         stopFullRoomListening();
         stopVoiceListening();
@@ -492,31 +518,25 @@ const startFullRoomListening = async () => {
   }, [activeSidebar]);
 
   // --- RECORDING VIDEO MEETING ---
-// --- RECORDING VIDEO MEETING (CHUẨN: QUAY MÀN HÌNH + LƯU TÊN USER) ---
   const startRecording = async () => {
     try {
-      // 1. BẮT BUỘC dùng getDisplayMedia để quay toàn bộ màn hình (thấy cả người khác)
       const screenStream = await navigator.mediaDevices.getDisplayMedia({
         video: { cursor: "always" } as any,
-        audio: false // Tắt tiếng của màn hình để tránh bị vang (sẽ dùng mic bên dưới)
+        audio: false 
       });
       
-      screenStreamRef.current = screenStream; // Lưu lại để tí nữa tắt đèn quay
+      screenStreamRef.current = screenStream; 
 
-      // 2. Tạo luồng quay: [Hình ảnh màn hình] + [Âm thanh cuộc họp]
       const mixedStream = new MediaStream();
-
-      // Lấy hình ảnh từ màn hình
       screenStream.getVideoTracks().forEach((t) => mixedStream.addTrack(t));
 
-      // Lấy âm thanh: Ưu tiên bộ trộn (Nghe cả mình + Bạn), nếu không thì lấy Mic mình
+      // Lấy âm thanh: Ưu tiên bộ trộn
       if (window.mixedAudioTrack) {
         mixedStream.addTrack(window.mixedAudioTrack);
       } else if (localStream) {
         localStream.getAudioTracks().forEach((t) => mixedStream.addTrack(t));
       }
 
-      // 3. Cấu hình bộ ghi
       const recorder = new MediaRecorder(mixedStream, { mimeType: "video/webm;codecs=vp9,opus" });
       recordedChunks.current = [];
 
@@ -524,16 +544,12 @@ const startFullRoomListening = async () => {
         if (e.data.size > 0) recordedChunks.current.push(e.data);
       };
 
-      // 4. XỬ LÝ KHI DỪNG QUAY (Lưu file & Upload)
       const handleStop = async () => {
-        // Tắt luồng quay màn hình (để trình duyệt tắt thông báo "Sharing")
         if (screenStreamRef.current) {
              screenStreamRef.current.getTracks().forEach(track => track.stop());
         }
 
         const blob = new Blob(recordedChunks.current, { type: 'video/webm' });
-        
-        // [QUAN TRỌNG] Đặt tên file bắt đầu bằng Username để lọc hiển thị
         const username = currentUser?.username || "Guest";
         const filename = `${username}_${roomId}_${Date.now()}.webm`;
 
@@ -549,7 +565,7 @@ const startFullRoomListening = async () => {
           });
 
           if (response.ok) {
-            toast({ title: "Thành công!", description: "Video đã được lưu vào danh sách của bạn." });
+            toast({ title: "Thành công!", description: "Video đã được lưu." });
           } else {
             toast({ title: "Lưu thất bại", variant: "destructive" });
           }
@@ -562,12 +578,8 @@ const startFullRoomListening = async () => {
       };
 
       recorder.onstop = handleStop;
-
-      // 5. Tự động dừng khi người dùng bấm nút "Stop Sharing" của trình duyệt
       screenStream.getVideoTracks()[0].onended = () => {
-          if (recorder.state === 'recording') {
-              recorder.stop();
-          }
+          if (recorder.state === 'recording') recorder.stop();
       };
 
       recorder.start();
@@ -577,10 +589,10 @@ const startFullRoomListening = async () => {
 
     } catch (err) {
       console.error("Ghi hình lỗi:", err);
-      // Lỗi này thường do người dùng bấm "Cancel" khi chọn màn hình
       toast({ title: "Đã hủy ghi hình", variant: "destructive" });
     }
   };
+
   const stopRecording = () => {
     mediaRecorderRef.current?.stop();
     setIsRecording(false);
@@ -592,14 +604,14 @@ const startFullRoomListening = async () => {
 
   // --- SUMMARIZE ---
   const summarizeMeeting = async () => {
-    if (!window.mixedAudioTrack) {
-        // Fallback nếu chưa có mixed track
+    const trackToUse = window.mixedAudioTrack || localStream?.getAudioTracks()[0];
+    if (!trackToUse) {
         toast({ title: "Chưa có dữ liệu âm thanh!", variant: "destructive" });
         return;
     }
 
     setIsAiLoading(true);
-    const mixedStream = new MediaStream([window.mixedAudioTrack]);
+    const mixedStream = new MediaStream([trackToUse]);
     const recorder = new MediaRecorder(mixedStream);
     const chunks: Blob[] = [];
 
@@ -618,7 +630,7 @@ const startFullRoomListening = async () => {
         form.append('roomId', roomId);
 
         try {
-            const res = await fetch('/api/speech', { method: 'POST', body: form }); // API endpoint của bạn
+            const res = await fetch('/api/speech', { method: 'POST', body: form });
             const data = await res.json();
             if (data.summary) {
                 setLatestSummary(data.summary);
