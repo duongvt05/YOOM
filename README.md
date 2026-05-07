@@ -1,4 +1,4 @@
-# 2. Cài dependencies
+# 2. Cài dependencies !!!
 npm install
 
 # 3. Tạo file .env.local (QUAN TRỌNG NHẤT!!!)
